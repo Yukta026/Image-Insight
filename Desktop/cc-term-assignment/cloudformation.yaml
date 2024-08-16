@@ -1,0 +1,522 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template for Image Processing application"
+
+Parameters:
+  InputS3BucketName:
+    Type: String
+    Default: image-processor-input-s3bucket
+    Description: S3 bucket for storing input images
+  
+  FrontendCodeS3BucketName:
+    Type: String
+    Default: term-project-deploy
+    Description: S3 bucket for storing frontend code
+
+  FrontendCodeS3KeyName:
+    Type: String
+    Default: cc-term-1.zip
+    Description: S3 key for frontend code
+
+  LabRoleArn:
+    Type: String
+    Default: arn:aws:iam::131995096578:role/LabRole
+    Description: ARN of the existing LabRole
+
+  IamInstanceProfile:
+    Type: String
+    Default: arn:aws:iam::131995096578:instance-profile/LabInstanceProfile
+    Description: ARN of the existing IAM Instance Profile (LabInstanceProfile)
+
+Resources:
+  ImageProcessorLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: nodejs16.x
+      Role: !Ref LabRoleArn
+      Handler: "index.handler"
+      Environment:
+        Variables:
+          INPUT_BUCKET_NAME: !Ref InputS3BucketName
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const s3 = new AWS.S3();
+
+          const S3_BUCKET = process.env.INPUT_BUCKET_NAME;
+
+          exports.handler = async (event) => {
+              // Storing user input to body constant
+              const body = JSON.parse(event.body);
+              const { email, image_data } = body;
+              
+              // Converting uploaded image to base64Img
+              const buffer = Buffer.from(image_data, 'base64');
+              // Storing image name in s3 key 
+              const s3Key = `${email}.jpg`;
+              const s3Params = {
+                  Bucket: S3_BUCKET,
+                  Key: s3Key,
+                  Body: buffer,
+                  ContentEncoding: 'base64',
+                  ContentType: 'image/jpeg'
+              };
+              
+              try {
+                  // Uploading image to S3
+                  await s3.putObject(s3Params).promise();
+                  
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': '*',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      body: JSON.stringify({ message: 'Image uploaded successfully' })
+                  };
+              } catch (error) {
+                  console.error('Error uploading image:', error);
+                  return {
+                      statusCode: 500,
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': '*',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      body: JSON.stringify({ error: 'Error uploading image' })
+                  };
+              }
+          };
+      Description: "Image Processor Lambda function"
+
+  RekognitionLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: nodejs16.x
+      Role: !Ref LabRoleArn
+      Handler: "index.handler"
+      Environment:
+        Variables:
+          INPUT_BUCKET_NAME: !Ref InputS3BucketName
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const rekognition = new AWS.Rekognition();
+          const s3 = new AWS.S3();
+          const S3_BUCKET = process.env.INPUT_BUCKET_NAME;
+          exports.handler = async (event) => {
+              const { email } = JSON.parse(event.body);
+
+              try {
+                  const params = {
+                      Image: {
+                          S3Object: {
+                              Bucket: S3_BUCKET,
+                              Name: `${email}.jpg`
+                          }
+                      },
+                      Attributes: ['ALL']
+                  };
+
+                  const data = await rekognition.detectFaces(params).promise();
+
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': '*',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      body: JSON.stringify(data)
+                  };
+              } catch (error) {
+                  console.error('Error analyzing image:', error);
+                  return {
+                      statusCode: 500,
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': '*',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      body: JSON.stringify({ message: 'Failed to analyze image.' })
+                  };
+              }
+          };
+      Description: "Rekognition Lambda function"
+
+  TextExtractLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Runtime: nodejs16.x
+      Role: !Ref LabRoleArn
+      Handler: "index.handler"
+      Environment:
+        Variables:
+          INPUT_BUCKET_NAME: !Ref InputS3BucketName
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const textract = new AWS.Textract();
+          const s3 = new AWS.S3();
+          const S3_BUCKET = process.env.INPUT_BUCKET_NAME;
+          exports.handler = async (event) => {
+              const { email } = JSON.parse(event.body);
+
+              try {
+                  const params = {
+                      Bucket: S3_BUCKET,
+                      Key: `${email}.jpg`
+                  };
+
+                  const s3Data = await s3.getObject(params).promise();
+
+                  const textractParams = {
+                      Document: {
+                          Bytes: s3Data.Body
+                      }
+                  };
+
+                  const data = await textract.detectDocumentText(textractParams).promise();
+
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': '*',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      body: JSON.stringify({
+                          data: data.Blocks
+                      })
+                  };
+              } catch (error) {
+                  console.error('Error extracting text:', error);
+                  return {
+                      statusCode: 500,
+                      headers: {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': '*',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      body: JSON.stringify({ message: 'Failed to extract text.' })
+                  };
+              }
+          };
+      Description: "Text Extraction Lambda function"
+
+  InputS3Bucket:
+    Type: "AWS::S3::Bucket"
+    DependsOn: "PermissionForS3ToInvokeLambda"
+    Properties:
+      BucketName: !Ref InputS3BucketName
+      CorsConfiguration:
+        CorsRules:
+        - AllowedHeaders:
+          - "*"
+          AllowedMethods:
+          - PUT
+          - POST
+          - GET
+          AllowedOrigins:
+          - "*"
+          Id: myCORSRuleId1
+          MaxAge: 3600
+
+  PermissionForS3ToInvokeLambda:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt ImageProcessorLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "s3.amazonaws.com"
+      SourceArn: !Sub "arn:aws:s3:::${InputS3BucketName}"
+
+  UploadApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: UploadApi
+      Description: "API for uploading images"
+      EndpointConfiguration:
+        Types:
+        - REGIONAL
+
+  UploadResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref UploadApi
+      ParentId: !GetAtt UploadApi.RootResourceId
+      PathPart: "upload"
+    
+
+  UploadResourceOPTIONS:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ResourceId: !Ref UploadResource
+      HttpMethod: OPTIONS
+      AuthorizationType: "NONE"
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST,GET'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+
+  UploadResourcePOST:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ResourceId: !Ref UploadResource
+      HttpMethod: "POST"
+      AuthorizationType: "NONE"
+      Integration:
+        Type: "AWS_PROXY"
+        IntegrationHttpMethod: "POST"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ImageProcessorLambda.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+
+
+  AnalysisResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ParentId: !GetAtt UploadApi.RootResourceId
+      PathPart: "analysis"
+    
+
+  ExtractResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ParentId: !GetAtt UploadApi.RootResourceId
+      PathPart: "extract"
+
+
+  AnalysisResourcePOST:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ResourceId: !Ref AnalysisResource
+      HttpMethod: "POST"
+      AuthorizationType: "NONE"
+      Integration:
+        Type: "AWS_PROXY"
+        IntegrationHttpMethod: "POST"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RekognitionLambda.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ExtractResourcePOST:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ResourceId: !Ref ExtractResource
+      HttpMethod: "POST"
+      AuthorizationType: "NONE"
+      Integration:
+        Type: "AWS_PROXY"
+        IntegrationHttpMethod: "POST"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TextExtractLambda.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  AnalysisResourceOPTIONS:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ResourceId: !Ref AnalysisResource
+      HttpMethod: OPTIONS
+      AuthorizationType: "NONE"
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST,GET'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+
+  ExtractResourceOPTIONS:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref UploadApi
+      ResourceId: !Ref ExtractResource
+      HttpMethod: OPTIONS
+      AuthorizationType: "NONE"
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST,GET'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ""
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  Deployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn: 
+    - UploadResourcePOST
+    - UploadResourceOPTIONS
+    Properties:
+      RestApiId: !Ref UploadApi
+      Description: "Prod Deployment"
+
+  Prod:
+    Type: "AWS::ApiGateway::Stage"
+    Properties: 
+      StageName: "prodyyy"
+      Description: "Prod Stage"
+      RestApiId: !Ref UploadApi
+      DeploymentId: !Ref Deployment
+
+  PermissionForAPIGatewayInvokeImageProcessorLambda:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt ImageProcessorLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${UploadApi}/*/POST/upload"
+
+  AnalysisPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref RekognitionLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${UploadApi}/*/POST/analysis"
+
+  ExtractPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref TextExtractLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${UploadApi}/*/POST/extract"
+
+  ElasticBeanStalkApplication:
+    Type: "AWS::ElasticBeanstalk::Application"
+    Properties:
+      ApplicationName: "ImageProcessorFrontend"
+      Description: "Elastic Beanstalk application for frontend"
+
+  EBAppVersion1:
+    Type: "AWS::ElasticBeanstalk::ApplicationVersion"
+    Properties:
+      ApplicationName: !Ref ElasticBeanStalkApplication
+      Description: "Version 1"
+      SourceBundle:
+        S3Bucket: !Ref FrontendCodeS3BucketName
+        S3Key: !Ref FrontendCodeS3KeyName
+
+  EBEnvironment:
+    Type: "AWS::ElasticBeanstalk::Environment"
+    DependsOn: Prod
+    Properties:
+      ApplicationName: !Ref ElasticBeanStalkApplication
+      Description: "Elastic Beanstalk environment for frontend"
+      EnvironmentName: prodyyy
+      CNAMEPrefix: ImageProcessor
+      SolutionStackName: "64bit Amazon Linux 2023 v4.3.4 running Docker"
+      VersionLabel: !Ref EBAppVersion1
+      OptionSettings: 
+      - Namespace: 'aws:elasticbeanstalk:environment'
+        OptionName: EnvironmentType
+        Value: SingleInstance
+      - Namespace: 'aws:autoscaling:launchconfiguration'
+        OptionName: IamInstanceProfile  
+        Value: !Ref IamInstanceProfile
+      - Namespace: 'aws:elasticbeanstalk:environment'
+        OptionName: ServiceRole
+        Value: !Ref LabRoleArn
+      - Namespace: 'aws:autoscaling:launchconfiguration'
+        OptionName: InstanceType
+        Value: t3.medium
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: REACT_APP_IMAGE_UPLOAD_API_GATEWAY_URL
+        Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/upload"
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: REACT_APP_FACE_DETECTION_API_GATEWAY_URL
+        Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/analysis" 
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: REACT_APP_TEXT_EXTRACTION_API_GATEWAY_URL
+        Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/extract"
+
+Outputs:
+  POSTUploadAPIGatewayURL:
+    Description: "POST URL for uploading images"
+    Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/upload"
+
+  POSTAnalysisAPIGatewayURLProd:
+    Description: "POST URL for image analysis (prod stage)"
+    Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/analysis"
+
+  POSTExtractAPIGatewayURLProd:
+    Description: "POST URL for text extraction (prod stage)"
+    Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/extract"
+
+  FrontendURL:
+    Description: "URL for the frontend"
+    Value: !Sub "http://ImageProcessor.${AWS::Region}.elasticbeanstalk.com"
+

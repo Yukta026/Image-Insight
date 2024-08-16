@@ -1,0 +1,6 @@
+services:
+  frontend_container:
+    build: .
+    image: cc-term-assignment
+    ports:
+      - "80:3000"
